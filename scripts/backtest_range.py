@@ -10,7 +10,9 @@ Data sources:
                      re-run doesn't hit the API again.
     --source dhan    Fetch 1-min candles from Dhan v2 and roll them up to
                      3-min bars (Dhan has no 3-min interval). Needs
-                     DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN in .env. Uses the
+                     DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN in .env, or
+                     DHAN_TOKEN_FILE pointing at a JSON file with
+                     "access_token" and "client_id". Uses the
                      NSE token from config/nifty50.json as Dhan securityId.
     --source csv     Read cached/exported candles from --data-dir. One JSON
                      file per day: {"nifty": [...], "stocks": {sym: [...]}},
@@ -134,12 +136,21 @@ def dhan_fetch_1m(security_id: str, segment: str, instrument: str,
             "fromDate": f"{chunk_start} 09:00:00",  # Dhan excludes a bar starting exactly at fromDate
             "toDate": f"{chunk_end} 15:30:00",
         }
+        resp = None
         for attempt in range(4):
-            resp = requests.post(DHAN_INTRADAY_URL, json=body, headers=headers, timeout=30)
+            try:
+                resp = requests.post(DHAN_INTRADAY_URL, json=body, headers=headers, timeout=30)
+            except requests.RequestException as e:
+                logger.warning(f"Dhan {security_id}: {e.__class__.__name__}, retrying")
+                time_mod.sleep(2 ** attempt)
+                continue
             if resp.status_code == 429:
                 time_mod.sleep(2 ** attempt)
                 continue
             break
+        if resp is None:
+            logger.warning(f"Dhan {security_id}: request failed after retries")
+            return out
         if resp.status_code != 200:
             logger.warning(f"Dhan {security_id}: HTTP {resp.status_code} {resp.text[:200]}")
             return out
@@ -239,6 +250,52 @@ def trade_net_pnl(calc: TransactionCostCalculator, trade: Dict, capital_per_trad
     }
 
 
+def load_days(source: str, start: date, end: date, stock_list: List[Dict], data_dir: Path):
+    """Yield (date_str, {"nifty": [...], "stocks": {...}}) for each trading day with data."""
+    client = None
+    dhan_series = None
+    if source == "angel":
+        from dotenv import load_dotenv
+        from src.broker.angel_client import AngelOneClient
+        load_dotenv()
+        client = AngelOneClient()
+        if not client.login():
+            logger.error("Angel One login failed")
+            sys.exit(1)
+    elif source == "dhan":
+        import os
+        from dotenv import load_dotenv
+        load_dotenv()
+        token_file = os.getenv("DHAN_TOKEN_FILE")
+        if token_file and not os.getenv("DHAN_ACCESS_TOKEN"):
+            # JSON with "access_token" and "client_id" keys
+            with open(token_file, "r", encoding="utf-8") as f:
+                tok = json.load(f)
+            os.environ["DHAN_ACCESS_TOKEN"] = tok.get("access_token", "")
+            os.environ["DHAN_CLIENT_ID"] = str(tok.get("client_id", ""))
+        if not os.getenv("DHAN_ACCESS_TOKEN") or not os.getenv("DHAN_CLIENT_ID"):
+            logger.error("Set DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN (or DHAN_TOKEN_FILE) in .env")
+            sys.exit(1)
+        dhan_series = fetch_range_dhan(start, end, stock_list)
+
+    for d in weekdays(start, end):
+        ds = d.isoformat()
+        if dhan_series is not None:
+            day = {
+                "nifty": slice_day(dhan_series.get("__NIFTY__", []), d),
+                "stocks": {sym: sl for sym, c in dhan_series.items()
+                           if sym != "__NIFTY__" and (sl := slice_day(c, d))},
+            }
+        elif client:
+            day = fetch_day_angel(client, ds, stock_list)
+        else:
+            day = fetch_day_csv(data_dir, ds)
+        if not day or not day.get("nifty"):
+            logger.info(f"{ds}: no data (holiday?) — skipped")
+            continue
+        yield ds, day
+
+
 def main():
     parser = argparse.ArgumentParser(description="Multi-day 3-minute breakout backtest")
     parser.add_argument("--start", help="Start date YYYY-MM-DD")
@@ -259,44 +316,9 @@ def main():
     engine = BacktestEngine(config)
     calc = TransactionCostCalculator(args.broker)
 
-    client = None
-    if args.source == "angel":
-        from dotenv import load_dotenv
-        from src.broker.angel_client import AngelOneClient
-        load_dotenv()
-        client = AngelOneClient()
-        if not client.login():
-            logger.error("Angel One login failed")
-            sys.exit(1)
-
-    dhan_series = None
-    if args.source == "dhan":
-        import os
-        from dotenv import load_dotenv
-        load_dotenv()
-        if not os.getenv("DHAN_ACCESS_TOKEN") or not os.getenv("DHAN_CLIENT_ID"):
-            logger.error("Set DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN in .env")
-            sys.exit(1)
-        dhan_series = fetch_range_dhan(start, end, stock_list)
-
     days_out = []
     all_trades = []
-    for d in weekdays(start, end):
-        ds = d.isoformat()
-        if dhan_series is not None:
-            day = {
-                "nifty": slice_day(dhan_series.get("__NIFTY__", []), d),
-                "stocks": {sym: sl for sym, c in dhan_series.items()
-                           if sym != "__NIFTY__" and (sl := slice_day(c, d))},
-            }
-        elif client:
-            day = fetch_day_angel(client, ds, stock_list)
-        else:
-            day = fetch_day_csv(Path(args.data_dir), ds)
-        if not day or not day.get("nifty"):
-            logger.info(f"{ds}: no data (holiday?) — skipped")
-            continue
-
+    for ds, day in load_days(args.source, start, end, stock_list, Path(args.data_dir)):
         result = engine.run(ds, day["nifty"], day["stocks"], stock_list).to_dict()
         day_net = 0.0
         for t in result["trades"]:

@@ -140,6 +140,33 @@ class BacktestEngine:
         self.target_percent = float(params.get("target_percent", 1.0))
         self.max_trades_per_day = int(params.get("max_trades_per_day", 2))
 
+        # --- Optional research knobs (defaults reproduce the live strategy) ---
+        # "fade": gap-up -> short top gappers, gap-down -> long bottom gappers.
+        # "follow": gap-up -> long top gappers, gap-down -> short bottom gappers.
+        self.direction_mode = str(params.get("direction_mode", "fade"))
+        self.allow_long = bool(params.get("allow_long", True))
+        self.allow_short = bool(params.get("allow_short", True))
+        self.entry_cutoff = self._parse_hhmm(params.get("entry_cutoff"), NO_NEW_ENTRY_AFTER)
+        # Skip the stock when the reference candle range is outside these bounds (%)
+        self.min_ref_range_percent = float(params.get("min_ref_range_percent", 0.0))
+        self.max_ref_range_percent = float(params.get("max_ref_range_percent", 100.0))
+        # Target as a multiple of initial risk instead of a fixed percent (0 = off)
+        self.target_rr = float(params.get("target_rr", 0.0))
+        # Move stop to entry once price has moved this % in favour (0 = off)
+        self.breakeven_at_percent = float(params.get("breakeven_at_percent", 0.0))
+        # Trail the stop this % behind the best close since entry (0 = off)
+        self.trail_percent = float(params.get("trail_percent", 0.0))
+        # Only enter when the Nifty 3-min candle at the same time agrees with the trade side
+        self.nifty_confirm = bool(params.get("nifty_confirm", False))
+        self.save_reports = bool(params.get("save_reports", True))
+
+    @staticmethod
+    def _parse_hhmm(value, default: time) -> time:
+        if not value:
+            return default
+        hh, mm = str(value).split(":")[:2]
+        return time(int(hh), int(mm))
+
     def run(
         self,
         date_str: str,
@@ -183,6 +210,10 @@ class BacktestEngine:
         trades = []
         no_entry_stocks = []
 
+        nifty_by_ts = {
+            c.get("timestamp", ""): c for c in self._parse_candles_for_test_date(nifty_candles)
+        }
+
         for stock_info in selected:
             symbol = stock_info["symbol"]
             direction = stock_info["direction"]
@@ -196,14 +227,14 @@ class BacktestEngine:
                 })
                 continue
 
-            trade, ref_info = self._simulate_stock(symbol, direction, candles)
+            trade, ref_info = self._simulate_stock(symbol, direction, candles, nifty_by_ts)
             if trade:
                 trades.append(trade)
             else:
                 no_entry_stocks.append({
                     "symbol": symbol,
                     "direction": direction,
-                    "reason": "No breakout signal",
+                    "reason": (ref_info or {}).get("skip_reason", "No breakout signal"),
                     "reference_candle": ref_info or {},
                 })
 
@@ -223,7 +254,8 @@ class BacktestEngine:
                 )
 
         # === Step 5: Save full report to JSON ===
-        self._save_report(result)
+        if self.save_reports:
+            self._save_report(result)
 
         return result
 
@@ -351,34 +383,44 @@ class BacktestEngine:
         gap_status = nifty_gap.get("gap_status", "FLAT")
         max_trades = self.max_trades_per_day
 
+        # Side traded for the top (gap-up) and bottom (gap-down) ranked stocks
+        top_side, bottom_side = ("SHORT", "LONG")
+        if self.direction_mode == "follow":
+            top_side, bottom_side = ("LONG", "SHORT")
+
         if gap_status == "GAP_UP":
             selected = [s.copy() for s in ranked_stocks[:max_trades]]
             for s in selected:
-                s["direction"] = "SHORT"
+                s["direction"] = top_side
 
         elif gap_status == "GAP_DOWN":
             selected = [s.copy() for s in ranked_stocks[-max_trades:]]
             for s in selected:
-                s["direction"] = "LONG"
+                s["direction"] = bottom_side
 
         else:
             trades_per_side = max(1, max_trades // 2)
-            short_picks = [s.copy() for s in ranked_stocks[:trades_per_side]]
-            for s in short_picks:
-                s["direction"] = "SHORT"
-            long_picks = [s.copy() for s in ranked_stocks[-trades_per_side:]]
-            for s in long_picks:
-                s["direction"] = "LONG"
-            selected = short_picks + long_picks
+            top_picks = [s.copy() for s in ranked_stocks[:trades_per_side]]
+            for s in top_picks:
+                s["direction"] = top_side
+            bottom_picks = [s.copy() for s in ranked_stocks[-trades_per_side:]]
+            for s in bottom_picks:
+                s["direction"] = bottom_side
+            selected = top_picks + bottom_picks
 
-        return selected
+        return [
+            s for s in selected
+            if (s["direction"] == "LONG" and self.allow_long)
+            or (s["direction"] == "SHORT" and self.allow_short)
+        ]
 
     # ================================================================
     # TRADE SIMULATION
     # ================================================================
 
     def _simulate_stock(
-        self, symbol: str, direction: str, candles: List[Dict]
+        self, symbol: str, direction: str, candles: List[Dict],
+        nifty_by_ts: Optional[Dict[str, Dict]] = None,
     ) -> tuple:
         """
         Simulate the 3-minute breakout strategy for a single stock.
@@ -412,6 +454,10 @@ class BacktestEngine:
             "timestamp": ref_candle.get("timestamp", ""),
         }
 
+        if not (self.min_ref_range_percent <= ref_range_pct <= self.max_ref_range_percent):
+            ref_info["skip_reason"] = "Reference candle range outside limits"
+            return None, ref_info
+
         # --- Scan subsequent candles for breakout ---
         trade: Optional[BacktestTrade] = None
 
@@ -421,12 +467,20 @@ class BacktestEngine:
 
             if trade is None:
                 # Looking for breakout entry
-                if candle_t >= NO_NEW_ENTRY_AFTER:
-                    break  # Past entry cutoff (3:00 PM)
+                if candle_t >= self.entry_cutoff:
+                    break  # Past entry cutoff (3:00 PM by default)
 
                 entry_signal = self._check_candle_breakout(
                     candle, direction, ref_high, ref_low
                 )
+                if entry_signal and self.nifty_confirm:
+                    nc = (nifty_by_ts or {}).get(candle_time_str)
+                    if nc is None:
+                        entry_signal = False
+                    elif direction == "LONG":
+                        entry_signal = nc["close"] > nc["open"]
+                    else:
+                        entry_signal = nc["close"] < nc["open"]
 
                 if entry_signal:
                     entry_price = candle["close"]
@@ -469,6 +523,9 @@ class BacktestEngine:
                     trade.pnl_percent = self._calc_pnl_percent(trade)
                     return trade, ref_info
 
+                # Stop adjustments use this candle's close, so they apply from the next candle
+                self._adjust_stop(trade, candle["close"])
+
         # If still in trade at end of data → forced square off
         if trade and trade.exit_price == 0:
             last_candle = test_candles[-1]
@@ -480,6 +537,19 @@ class BacktestEngine:
             return trade, ref_info
 
         return trade, ref_info
+
+    def _adjust_stop(self, trade: BacktestTrade, close: float) -> None:
+        """Breakeven / trailing stop, only ever tightening the stop."""
+        sign = 1 if trade.direction == "LONG" else -1
+        new_sl = trade.stop_loss
+        if self.breakeven_at_percent > 0:
+            gain_pct = sign * (close - trade.entry_price) / trade.entry_price * 100
+            if gain_pct >= self.breakeven_at_percent:
+                new_sl = max(new_sl, trade.entry_price) if sign > 0 else min(new_sl, trade.entry_price)
+        if self.trail_percent > 0:
+            trail = close * (1 - sign * self.trail_percent / 100)
+            new_sl = max(new_sl, trail) if sign > 0 else min(new_sl, trail)
+        trade.stop_loss = round(new_sl, 2)
 
     def _check_candle_breakout(
         self, candle: Dict, direction: str, ref_high: float, ref_low: float
@@ -533,12 +603,16 @@ class BacktestEngine:
             else:
                 sl = ref_low
             target = entry * (1 + self.target_percent / 100)
+            if self.target_rr > 0:
+                target = entry + self.target_rr * (entry - sl)
         else:  # SHORT
             if is_large_candle:
                 sl = entry * (1 + self.stop_loss_percent / 100)
             else:
                 sl = ref_high
             target = entry * (1 - self.target_percent / 100)
+            if self.target_rr > 0:
+                target = entry - self.target_rr * (sl - entry)
 
         return round(sl, 2), round(target, 2)
 
