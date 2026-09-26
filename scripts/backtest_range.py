@@ -131,7 +131,7 @@ def dhan_fetch_1m(security_id: str, segment: str, instrument: str,
             "instrument": instrument,
             "interval": "1",
             "oi": False,
-            "fromDate": f"{chunk_start} 09:15:00",
+            "fromDate": f"{chunk_start} 09:00:00",  # Dhan excludes a bar starting exactly at fromDate
             "toDate": f"{chunk_end} 15:30:00",
         }
         for attempt in range(4):
