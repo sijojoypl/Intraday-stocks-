@@ -61,4 +61,4 @@ Thumbs.db
 
 # Project specific
 *.bak
-temp/
+temp/backtests/dhan_collection/days/

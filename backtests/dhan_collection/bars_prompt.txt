@@ -1,0 +1,15 @@
+Data-collection task. Use ONLY the MCP tool `mcp__DHAN__historical_data_agent_tool` (load with ToolSearch "select:mcp__DHAN__historical_data_agent_tool") with action "intraday". Never call any other Dhan tool (no orders).
+
+A helper decides every query; you relay numbers. Helper: `python3 backtests/dhan_collection/bars.py`
+
+For each job (date symbol securityId):
+1. Run `python3 bars.py init <date> <symbol> <securityId>`. It prints `NEXT {json payload}` (or ALREADY DONE → skip the job).
+2. Call the Dhan tool, action "intraday", with that exact payload as a JSON string.
+3. From the response take "Data Points" N, the Summary Open/High/Low/Close (strip ₹ and commas), and every line under "Last 5 Candles" as o,h,l,c (ignore V). Then run:
+   `python3 bars.py put <date> <symbol> N SumOpen SumHigh SumLow SumClose "o,h,l,c;o,h,l,c;..."`
+   If the tool says DH-907 / "No data available" / Data Points 0, run `python3 bars.py put <date> <symbol> EMPTY`.
+   On a rate-limit or transient error: wait and retry the same payload (do not feed).
+4. If the helper prints ERROR, re-issue the SAME payload and feed the fresh answer. Otherwise repeat with the new NEXT until it prints DONE.
+Jobs are independent: advance ~3 jobs per round (one call per job, in parallel), then continue. Dhan's rate limit is shared with other agents; if you get rate-limited, slow down. Copy numbers exactly.
+
+When all jobs print DONE, reply with the DONE lines only, plus any problems.
