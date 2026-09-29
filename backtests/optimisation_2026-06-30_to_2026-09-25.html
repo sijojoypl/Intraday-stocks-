@@ -1,0 +1,278 @@
+<title>3-Min Breakout Optimisation, Jun–Sep 2026</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: single reading column, verdict first, then evidence tables in the order the analysis ran */
+:root {
+  --bg: #f5f7f8;
+  --surface: #ffffff;
+  --fg: #16202a;
+  --muted: #5b6875;
+  --line: #d9e0e5;
+  --accent: #0f6d78;
+  --accent-soft: #e2f0f1;
+  --gain: #1c7a43;
+  --loss: #b3322b;
+  --gain-bar: #2e9a5a;
+  --loss-bar: #d0584f;
+  --base-bar: #8a98a5;
+  --font-display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-data: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1519; --surface: #172026; --fg: #e3e9ed; --muted: #95a3ae; --line: #2a363e;
+    --accent: #5cc3cc; --accent-soft: #173238; --gain: #5fcf8a; --loss: #f07d74;
+    --gain-bar: #43b673; --loss-bar: #e0685f; --base-bar: #6b7a86; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1519; --surface: #172026; --fg: #e3e9ed; --muted: #95a3ae; --line: #2a363e;
+  --accent: #5cc3cc; --accent-soft: #173238; --gain: #5fcf8a; --loss: #f07d74;
+  --gain-bar: #43b673; --loss-bar: #e0685f; --base-bar: #6b7a86; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--fg);
+  font-family: var(--font-body); font-size: 16px; line-height: 1.6;
+  padding: 40px 20px 64px;
+}
+main { max-width: 860px; margin: 0 auto; display: flex; flex-direction: column; gap: 44px; }
+h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; line-height: 1.2; margin: 0; }
+h1 { font-size: clamp(1.8rem, 4.5vw, 2.5rem); font-weight: 700; letter-spacing: -0.01em; }
+h2 { font-size: 1.45rem; font-weight: 600; }
+h3 { font-size: 1.1rem; font-weight: 600; }
+p { margin: 0; max-width: 68ch; }
+section { display: flex; flex-direction: column; gap: 16px; }
+.eyebrow {
+  font-family: var(--font-data); font-size: 0.78rem; text-transform: uppercase;
+  letter-spacing: 0.08em; color: var(--accent);
+}
+header { display: flex; flex-direction: column; gap: 12px; }
+.meta { color: var(--muted); font-size: 0.95rem; }
+.num, td.n, th.n { font-family: var(--font-data); font-variant-numeric: tabular-nums; }
+.pos { color: var(--gain); }
+.neg { color: var(--loss); }
+
+.verdict {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+  padding: 24px; display: flex; flex-direction: column; gap: 14px;
+}
+.verdict .call { font-family: var(--font-display); font-size: 1.35rem; font-weight: 600; }
+.verdict ul { margin: 0; padding-left: 1.2em; display: flex; flex-direction: column; gap: 6px; }
+
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+.stat {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
+  padding: 14px 16px; display: flex; flex-direction: column; gap: 2px; min-width: 0;
+}
+.stat .label { font-size: 0.8rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+.stat .value { font-family: var(--font-data); font-size: 1.3rem; font-variant-numeric: tabular-nums; }
+
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 0.92rem; }
+th, td { padding: 9px 12px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { font-weight: 600; color: var(--muted); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; }
+tr:last-child td { border-bottom: 0; }
+td.n, th.n { text-align: right; }
+td.setting { white-space: normal; min-width: 220px; }
+tr.base td { background: var(--accent-soft); }
+
+.chart { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 16px; overflow-x: auto; }
+.chart svg { display: block; width: 100%; min-width: 420px; height: auto; }
+.chart text { font-family: var(--font-data); font-size: 11px; fill: var(--muted); }
+.chart .val { fill: var(--fg); font-size: 11px; }
+.legend { display: flex; flex-wrap: wrap; gap: 16px; font-size: 0.85rem; color: var(--muted); margin-top: 8px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 12px; height: 12px; border-radius: 2px; display: inline-block; }
+
+.note {
+  border-left: 3px solid var(--line); padding: 4px 0 4px 14px; color: var(--muted); font-size: 0.95rem;
+}
+code, pre { font-family: var(--font-data); font-size: 0.85rem; }
+pre {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
+  padding: 14px 16px; overflow-x: auto; margin: 0; line-height: 1.5;
+}
+footer { color: var(--muted); font-size: 0.85rem; border-top: 1px solid var(--line); padding-top: 16px; }
+</style>
+
+<main>
+  <header>
+    <div class="eyebrow">NSE intraday · 3-minute breakout · Nifty 50</div>
+    <h1>Strategy optimisation: 30 Jun – 25 Sep 2026</h1>
+    <p class="meta">63 trading days · 2 picks per day · ₹1,00,000 per trade · Angel One costs · all figures net of costs</p>
+  </header>
+
+  <section class="verdict" aria-labelledby="verdict-h">
+    <div class="eyebrow" id="verdict-h">Recommendation</div>
+    <div class="call">Keep the live settings. No change is justified by this data.</div>
+    <ul>
+      <li>Every setting ranked on the training period lost money on the test period.</li>
+      <li>The only settings that were positive on test are short-only, with 9–10 test trades, a losing July and one strong August.</li>
+      <li>One candidate to watch: an earlier entry cutoff at 12:00. It was the only change that beat the live settings in all three months. It still lost money on the test period, so forward-test it before touching <code>config/settings.json</code>.</li>
+    </ul>
+  </section>
+
+  <section aria-labelledby="base-h">
+    <h2 id="base-h">Baseline: the current live settings</h2>
+    <p class="meta">Fade, both sides, entry cutoff 15:00, no reference-range cap, 1.0% target, no breakeven, no trail.</p>
+    <div class="stats">
+      <div class="stat"><span class="label">Net P&amp;L</span><span class="value neg">₹-30</span></div>
+      <div class="stat"><span class="label">Trades</span><span class="value">75</span></div>
+      <div class="stat"><span class="label">Win rate</span><span class="value">49.3%</span></div>
+      <div class="stat"><span class="label">Profit factor</span><span class="value">1.00</span></div>
+      <div class="stat"><span class="label">Max drawdown</span><span class="value">₹8,691</span></div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <tbody>
+          <tr><td>Gross P&amp;L</td><td class="n">₹6,194</td></tr>
+          <tr><td>Costs</td><td class="n">₹6,224</td></tr>
+          <tr><td>Winners / losers</td><td class="n">37 / 38</td></tr>
+          <tr><td>Average win / average loss</td><td class="n">₹684 / ₹-667</td></tr>
+          <tr><td>Exits</td><td class="n">21 target · 18 stop · 36 square-off at 15:15</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Costs take the whole gross edge. July and August made a small profit, and September gave all of it back.</p>
+  </section>
+
+  <section aria-labelledby="month-h">
+    <h2 id="month-h">Month by month</h2>
+    <div class="chart">
+      <svg viewBox="0 0 600 250" role="img" aria-label="Monthly net P&amp;L. Baseline: July 2,533, August 2,960, September minus 5,396. 12:00 cutoff: July 3,795, August 4,014, September minus 2,546.">
+        <g stroke="var(--line)" stroke-width="1">
+          <line x1="70" y1="20" x2="590" y2="20"/>
+          <line x1="70" y1="65" x2="590" y2="65"/>
+          <line x1="70" y1="155" x2="590" y2="155"/>
+          <line x1="70" y1="200" x2="590" y2="200"/>
+        </g>
+        <line x1="70" y1="110" x2="590" y2="110" stroke="var(--muted)" stroke-width="1"/>
+        <g text-anchor="end">
+          <text x="62" y="24">₹6,000</text>
+          <text x="62" y="69">₹3,000</text>
+          <text x="62" y="114">0</text>
+          <text x="62" y="159">₹-3,000</text>
+          <text x="62" y="204">₹-6,000</text>
+        </g>
+        <!-- 15 px per ₹1,000; zero line at y=110 -->
+        <rect x="136" y="72.0" width="36" height="38.0" fill="var(--base-bar)"/>
+        <rect x="178" y="53.1" width="36" height="56.9" fill="var(--accent)"/>
+        <rect x="296" y="65.6" width="36" height="44.4" fill="var(--base-bar)"/>
+        <rect x="338" y="49.8" width="36" height="60.2" fill="var(--accent)"/>
+        <rect x="456" y="110" width="36" height="80.9" fill="var(--base-bar)"/>
+        <rect x="498" y="110" width="36" height="38.2" fill="var(--accent)"/>
+        <g text-anchor="middle" class="val">
+          <text class="val" x="154" y="66">2,533</text>
+          <text class="val" x="196" y="47">3,795</text>
+          <text class="val" x="314" y="60">2,960</text>
+          <text class="val" x="356" y="44">4,014</text>
+          <text class="val" x="474" y="205">-5,396</text>
+          <text class="val" x="516" y="162">-2,546</text>
+        </g>
+        <g text-anchor="middle">
+          <text x="175" y="238">Jul</text>
+          <text x="335" y="238">Aug</text>
+          <text x="495" y="238">Sep</text>
+        </g>
+      </svg>
+      <div class="legend">
+        <span><i class="sw" style="background:var(--base-bar)"></i>Baseline (cutoff 15:00)</span>
+        <span><i class="sw" style="background:var(--accent)"></i>Same settings, cutoff 12:00</span>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Month</th><th class="n">Trades</th><th class="n">Net</th></tr></thead>
+        <tbody>
+          <tr><td>30 Jun</td><td class="n">2</td><td class="n neg">₹-127</td></tr>
+          <tr><td>Jul</td><td class="n">29</td><td class="n pos">₹2,533</td></tr>
+          <tr><td>Aug</td><td class="n">24</td><td class="n pos">₹2,960</td></tr>
+          <tr><td>Sep</td><td class="n">20</td><td class="n neg">₹-5,396</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section aria-labelledby="split-h">
+    <h2 id="split-h">Train / test split</h2>
+    <p>Settings were ranked on the train period only, then scored on the later test period they never saw. Only the test numbers say whether a change is likely to hold up.</p>
+    <div class="stats">
+      <div class="stat"><span class="label">Train</span><span class="value" style="font-size:1rem">30 Jun – 26 Aug</span><span class="meta">42 days</span></div>
+      <div class="stat"><span class="label">Test</span><span class="value" style="font-size:1rem">27 Aug – 25 Sep</span><span class="meta">21 days</span></div>
+      <div class="stat"><span class="label">Settings tested</span><span class="value" style="font-size:1rem">304 eligible</span><span class="meta">≥ 20 train trades</span></div>
+      <div class="stat"><span class="label">Profitable on both</span><span class="value" style="font-size:1rem">12 of 163</span><span class="meta">train-profitable settings</span></div>
+    </div>
+  </section>
+
+  <section aria-labelledby="top-h">
+    <h3 id="top-h">Top 5 settings by train net</h3>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>#</th><th>Setting</th><th class="n">Train</th><th class="n">Test</th><th class="n">Jul</th><th class="n">Aug</th><th class="n">Sep</th><th class="n">Max DD</th></tr>
+        </thead>
+        <tbody>
+          <tr class="base"><td>–</td><td class="setting">Baseline (live)</td><td class="n">54t <span class="pos">₹5,725</span></td><td class="n">21t <span class="neg">₹-5,755</span></td><td class="n pos">₹2,533</td><td class="n pos">₹2,960</td><td class="n neg">₹-5,396</td><td class="n">₹8,691</td></tr>
+          <tr><td>1</td><td class="setting">fade/both, cutoff 12:00, target 2R</td><td class="n">48t <span class="pos">₹10,811</span></td><td class="n">14t <span class="neg">₹-1,969</span></td><td class="n pos">₹4,696</td><td class="n pos">₹5,904</td><td class="n neg">₹-1,610</td><td class="n">₹5,284</td></tr>
+          <tr><td>2</td><td class="setting">fade/both, cutoff 10:30, target 2R</td><td class="n">43t <span class="pos">₹10,162</span></td><td class="n">10t <span class="neg">₹-2,695</span></td><td class="n pos">₹5,134</td><td class="n pos">₹4,818</td><td class="n neg">₹-2,336</td><td class="n">₹4,972</td></tr>
+          <tr><td>3</td><td class="setting">fade/both, cutoff 12:00, target 1.5%</td><td class="n">48t <span class="pos">₹9,800</span></td><td class="n">14t <span class="neg">₹-2,177</span></td><td class="n pos">₹4,148</td><td class="n pos">₹4,928</td><td class="n neg">₹-1,818</td><td class="n">₹5,284</td></tr>
+          <tr><td>4</td><td class="setting">fade/both, cutoff 12:00, target 1.5R</td><td class="n">48t <span class="pos">₹9,553</span></td><td class="n">14t <span class="neg">₹-2,177</span></td><td class="n pos">₹4,090</td><td class="n pos">₹4,854</td><td class="n neg">₹-1,818</td><td class="n">₹5,284</td></tr>
+          <tr><td>5</td><td class="setting">fade/both, cutoff 10:30, target 1.5%</td><td class="n">43t <span class="pos">₹9,152</span></td><td class="n">10t <span class="neg">₹-2,406</span></td><td class="n pos">₹4,586</td><td class="n pos">₹3,841</td><td class="n neg">₹-2,047</td><td class="n">₹4,682</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>All five lost money on the test period. They lost less than the baseline, mostly because they took fewer trades. The best setting on train did not hold up out of sample.</p>
+  </section>
+
+  <section aria-labelledby="both-h">
+    <h3 id="both-h">Settings that made money on both train and test</h3>
+    <p>All 12 are short-only variants with a 12:00 or 15:00 cutoff. The best two:</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Setting</th><th class="n">Train</th><th class="n">Test</th><th class="n">Jul</th><th class="n">Aug</th><th class="n">Sep</th></tr></thead>
+        <tbody>
+          <tr><td class="setting">fade/short, cutoff 12:00, target 2R</td><td class="n">32t <span class="pos">₹6,553</span></td><td class="n">9t <span class="pos">₹905</span></td><td class="n neg">₹-239</td><td class="n pos">₹6,940</td><td class="n pos">₹905</td></tr>
+          <tr><td class="setting">fade/short, cutoff 15:00, target 2R</td><td class="n">34t <span class="pos">₹6,463</span></td><td class="n">10t <span class="pos">₹436</span></td><td class="n neg">₹-255</td><td class="n pos">₹6,866</td><td class="n pos">₹436</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>These don't convince. The test profit is ₹200–900 on 9–10 trades, about one winning trade. They lost money in July, and nearly all their profit came from August. That looks like a one-off, not an edge.</p>
+  </section>
+
+  <section aria-labelledby="cut-h">
+    <h3 id="cut-h">Entry cutoff alone, everything else live</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Cutoff</th><th class="n">Trades</th><th class="n">Net</th><th class="n">Jul</th><th class="n">Aug</th><th class="n">Sep</th></tr></thead>
+        <tbody>
+          <tr class="base"><td>15:00 (live)</td><td class="n">75</td><td class="n neg">₹-30</td><td class="n pos">₹2,533</td><td class="n pos">₹2,960</td><td class="n neg">₹-5,396</td></tr>
+          <tr><td>12:00</td><td class="n">62</td><td class="n pos">₹5,135</td><td class="n pos">₹3,795</td><td class="n pos">₹4,014</td><td class="n neg">₹-2,546</td></tr>
+          <tr><td>10:30</td><td class="n">53</td><td class="n pos">₹4,669</td><td class="n pos">₹3,968</td><td class="n pos">₹3,103</td><td class="n neg">₹-2,274</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>The 13 trades entered after 12:00 lost about ₹5,165 in total. Late breakouts have little time to reach the target and mostly end in the 15:15 square-off. The 12:00 cutoff beat 15:00 in every month, but it still lost money in September and on the test period (14 trades, ₹-2,905).</p>
+  </section>
+
+  <section aria-labelledby="why-h">
+    <h2 id="why-h">Why no change</h2>
+    <p>Three months and 75 baseline trades is a small sample. A 21-day test period with 10–21 trades can't separate a real improvement from noise. The next useful step is more history (for example March to June 2026) and a rerun of the same split, to see whether the 12:00 cutoff holds up.</p>
+    <p class="note">The data has no intraday Nifty series, so every <code>nifty_confirm</code> setting produced no trades. Those settings are left out.</p>
+  </section>
+
+  <section aria-labelledby="data-h">
+    <h2 id="data-h">Data and how to reproduce</h2>
+    <p>Dhan 1-minute bars for both picked stocks on every trading day: 126 stock-days, 360 bars each, none missing. Built into 3-minute candles (120 per pick) in <code>backtests/dhan_collection/days/</code>.</p>
+    <pre>python scripts/backtest_range.py --start 2026-06-30 --end 2026-09-25 \
+  --source csv --data-dir backtests/dhan_collection/days
+
+python scripts/optimize_strategy.py --start 2026-06-30 --end 2026-09-25 \
+  --source csv --data-dir backtests/dhan_collection/days --min-trades 20 --top 15</pre>
+  </section>
+
+  <footer>Backtest only. Past results on 63 days don't predict live performance.</footer>
+</main>
